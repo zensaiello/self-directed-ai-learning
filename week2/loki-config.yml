@@ -35,3 +35,9 @@ schema_config:
 
 ruler:
   alertmanager_url: http://localhost:9093
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-temp
+  enable_api: true
