@@ -9,6 +9,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.instrumentation.flask import FlaskInstrumentor
+from prometheus_flask_exporter import PrometheusMetrics
 
 # --- OpenTelemetry Setup ---
 
@@ -32,10 +33,13 @@ tracer = trace.get_tracer("order-api")
 
 app = Flask(__name__)
 FlaskInstrumentor().instrument_app(app)
+metrics = PrometheusMetrics(app, group_by='endpoint')
+
+# Custom metrics
+metrics.info("order_api_info", "Order API information", version="1.0.0")
 
 
 def simulate_db_query(query_name, min_ms=10, max_ms=50):
-    """Simulate a database query with variable latency."""
     with tracer.start_as_current_span(f"db.query.{query_name}") as span:
         span.set_attribute("db.system", "postgresql")
         span.set_attribute("db.operation", query_name)
@@ -45,13 +49,11 @@ def simulate_db_query(query_name, min_ms=10, max_ms=50):
 
 
 def simulate_external_call(service_name, min_ms=20, max_ms=200):
-    """Simulate an external service call with variable latency."""
     with tracer.start_as_current_span(f"external.{service_name}") as span:
         span.set_attribute("http.method", "POST")
         span.set_attribute("peer.service", service_name)
         duration = random.uniform(min_ms, max_ms) / 1000
         time.sleep(duration)
-        # Occasionally simulate a slow external call
         if random.random() < 0.1:
             time.sleep(0.5)
             span.set_attribute("slow_call", True)
@@ -59,13 +61,11 @@ def simulate_external_call(service_name, min_ms=20, max_ms=200):
 
 @app.route("/health")
 def health():
-    """Health check endpoint — minimal tracing."""
     return jsonify({"status": "ok"})
 
 
 @app.route("/orders", methods=["GET"])
 def list_orders():
-    """List orders — single DB query."""
     with tracer.start_as_current_span("list-orders") as span:
         span.set_attribute("endpoint", "/orders")
         simulate_db_query("select_orders", min_ms=15, max_ms=60)
@@ -76,19 +76,11 @@ def list_orders():
 
 @app.route("/orders/<int:order_id>", methods=["GET"])
 def get_order(order_id):
-    """Get a specific order — multiple operations."""
     with tracer.start_as_current_span("get-order") as span:
         span.set_attribute("order.id", order_id)
-
-        # Fetch order from DB
         simulate_db_query("select_order_by_id", min_ms=10, max_ms=40)
-
-        # Fetch inventory status
         simulate_db_query("select_inventory", min_ms=5, max_ms=25)
-
-        # Call external pricing service
         simulate_external_call("pricing-service", min_ms=30, max_ms=100)
-
         order = {
             "id": order_id,
             "status": "complete",
@@ -102,31 +94,16 @@ def get_order(order_id):
 
 @app.route("/orders/checkout", methods=["POST"])
 def checkout():
-    """Checkout — most complex operation with multiple service calls."""
     with tracer.start_as_current_span("checkout") as span:
-
-        # Validate cart
         simulate_db_query("select_cart", min_ms=10, max_ms=30)
-
-        # Check inventory
         simulate_db_query("select_inventory_check", min_ms=15, max_ms=50)
-
-        # Call pricing service
         simulate_external_call("pricing-service", min_ms=20, max_ms=80)
-
-        # Call tax service — occasionally slow
         simulate_external_call("tax-service", min_ms=15, max_ms=300)
-
-        # Call payment service
         simulate_external_call("payment-service", min_ms=50, max_ms=150)
-
-        # Write order to DB
         simulate_db_query("insert_order", min_ms=20, max_ms=60)
-
         total = round(random.uniform(10.0, 500.0), 2)
         span.set_attribute("checkout.total", total)
         span.set_attribute("checkout.success", True)
-
         return jsonify({"status": "success", "total": total})
 
 
