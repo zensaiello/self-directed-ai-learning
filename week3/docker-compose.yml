@@ -129,3 +129,15 @@ services:
       - monitoring
     depends_on:
       - tempo
+
+  order-api:
+    build:
+      context: ./app
+    container_name: order-api
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    networks:
+      - monitoring
+    depends_on:
+      - otel-collector
