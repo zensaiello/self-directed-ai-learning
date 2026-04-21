@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: product-catalog
+  labels:
+    app: product-catalog
+    track: kubernetes-lab
+spec:
+  containers:
+    - name: product-catalog
+      image: hashicorp/http-echo:9.9.9
+      args:
+        - "-text=product-catalog service - version 1.0"
+      ports:
+        - containerPort: 5678
