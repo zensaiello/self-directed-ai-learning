@@ -1,4 +1,13 @@
 // ============================================================
+// TRACING — Alloy self-instrumentation
+// ============================================================
+
+tracing {
+  sampling_fraction = 0.1
+  write_to = [otelcol.processor.batch.default.input]
+}
+
+// ============================================================
 // LOG COLLECTION — carried forward from Week 2
 // ============================================================
 
@@ -10,19 +19,16 @@ loki.source.docker "container_logs" {
   host       = "unix:///var/run/docker.sock"
   targets    = discovery.docker.containers.targets
   forward_to = [loki.write.local.receiver]
-
   relabel_rules = loki.relabel.container_labels.rules
 }
 
 loki.relabel "container_labels" {
   forward_to = []
-
   rule {
     source_labels = ["__meta_docker_container_name"]
     regex         = "/(.*)"
     target_label  = "container"
   }
-
   rule {
     source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
     target_label  = "service"
@@ -36,7 +42,7 @@ loki.write "local" {
 }
 
 // ============================================================
-// TRACE COLLECTION — new in Week 4
+// TRACE COLLECTION — receives from order-api and forwards to Tempo
 // ============================================================
 
 otelcol.receiver.otlp "default" {
@@ -46,7 +52,6 @@ otelcol.receiver.otlp "default" {
   http {
     endpoint = "0.0.0.0:4318"
   }
-
   output {
     traces = [otelcol.processor.batch.default.input]
   }
