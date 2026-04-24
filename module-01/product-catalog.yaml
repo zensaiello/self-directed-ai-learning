@@ -1,3 +1,6 @@
+# RETIRED after Module 1 — do not apply in subsequent modules
+# Purpose: demonstrated naked Pod behavior and the problem Deployments solve
+# Replaced by: product-catalog Deployment in module-02/product-catalog-deployment.yaml
 apiVersion: v1
 kind: Pod
 metadata:
