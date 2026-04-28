@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: product-catalog-broken
+  namespace: monitoring
+  labels:
+    # Missing: release: kube-prometheus-stack
+    app: product-catalog
+spec:
+  namespaceSelector:
+    matchNames:
+      - default
+  selector:
+    matchLabels:
+      app: product-catalog
+  endpoints:
+    - port: http
+      interval: 30s
+      path: /metrics
