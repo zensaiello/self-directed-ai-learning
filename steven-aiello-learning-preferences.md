@@ -140,4 +140,34 @@ A session is successful when:
 
 ---
 
+## 11. Application and Workload Context
+
+**Every track that involves infrastructure or platform technology must define what is running on it.** Teaching a technology without a workload running on it produces abstract knowledge that does not transfer to real conversations or real problems.
+
+**Use a realistic persistent workload for the duration of the track.** For platform tracks (Kubernetes, Docker, service mesh, etc.), the default workload is a small microservices e-commerce application consisting of multiple services with real dependencies — frontend, product catalog, cart, checkout, and a backing database. This workload is introduced in Module 1 and extended incrementally as each module adds a layer.
+
+**The workload is the vehicle for every concept.** Networking is real because two services need to communicate. Storage is real because the database must survive a restart. Observability is real because a checkout failure must be traced across multiple services. Every "how do I configure X" question is answered in terms of what the workload requires and why.
+
+**State the workload context at the start of each module.** Before any lab step, the business scenario is framed: what the application is, what problem the current module solves for it, and what breaks without it.
+
+---
+
+## 12. Failure Scenarios
+
+**Every module includes at least one deliberate failure scenario.** Failure pattern recognition is a distinct skill from configuration knowledge and must be practiced explicitly — not left to chance.
+
+**Two failure patterns are used:**
+
+- **Designed-in failures (start of module):** The lab begins with something intentionally broken. The diagnosis happens before the working version is seen. This builds the correct mental model — what "wrong" looks like is learned before "right" is memorized.
+
+- **Break-it exercises (end of module):** After a working configuration is verified, a targeted misconfiguration is introduced. The working state is restored through diagnosis, not by re-running setup steps.
+
+**Failure scenarios must be documented in the reference document.** Each failure entry includes: what was broken, what the symptoms were, what diagnostic commands or observations revealed the cause, and what the resolution was. This produces transferable operational knowledge.
+
+**Failures are never skipped or glossed over.** If a designed failure scenario reveals an unexpected real failure, the real failure takes priority. Diagnose and resolve it before continuing.
+
+**Frame failure scenarios in terms of how they appear in production.** A label selector mismatch is not just a lab exercise — it is a category of real incident that causes silent traffic failures in production clusters. The production consequence is stated when the failure is introduced.
+
+---
+
 *This document should be uploaded at the start of each new topic chat session.*
