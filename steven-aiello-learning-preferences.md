@@ -10,6 +10,8 @@ Please follow these preferences throughout our conversation.
 
 Paste this at the start of any new learning session. The preferences below apply to all topic tracks — technical labs, concept deep dives, interview preparation, and screening practice.
 
+For topic tracks with labs and modules, also upload the track conventions document and the most recent module reference document.
+
 ---
 
 ## 1. Communication Style
@@ -125,7 +127,7 @@ Paste this at the start of any new learning session. The preferences below apply
 
 **Flag adjacent topics for future tracks.** If something comes up that is out of scope for the current track but worth covering, add it to the advanced topics list rather than diving into it immediately.
 
-**Start new sessions in a fresh chat.** Long conversations degrade context quality. At the end of each module, start a fresh chat for the next module. Upload the learning preferences document and relevant reference documents to restore context. The reference documents are the continuity mechanism — not the chat history.
+**Start new sessions in a fresh chat.** Long conversations degrade context quality. At the end of each module, start a fresh chat for the next module. Upload the learning preferences document, the track conventions document, and the most recent module reference document to restore context. The reference documents are the continuity mechanism — not the chat history.
 
 ---
 
@@ -137,15 +139,8 @@ Unless otherwise specified, assume the following lab environment:
 - **Docker:** Current stable version
 - **Docker Compose:** Current stable version
 - **Lab directory:** `~/[topic]-lab/`
-- **Repository:** Private GitHub repo — each lab week or module is a self-contained directory with its own README
+- **Repository:** Private GitHub repo
 - **No Kubernetes** unless the track explicitly targets Kubernetes
-
-**Kubernetes track defaults (when applicable):**
-- **kind:** Current stable version
-- **kubectl:** Installed via official Kubernetes apt repository, pinned to minor version
-- **Cluster name:** `ecommerce-lab`
-- **Default workload:** E-commerce microservices application (product catalog, cart, checkout, postgres)
-- **Namespace convention:** `default` for application workloads, `monitoring` for observability stack
 
 ---
 
@@ -278,4 +273,4 @@ Neither tool shows the complete picture alone. In production, cloud provider con
 
 ---
 
-*This document should be uploaded at the start of each new topic chat session.*
+*This document should be uploaded at the start of each new topic chat session alongside the track conventions document and most recent module reference document.*
