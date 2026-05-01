@@ -36,3 +36,11 @@ spec:
         envFrom:
         - configMapRef:
             name: product-catalog-config
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: product-catalog
+            topologyKey: "kubernetes.io/hostname"
+
