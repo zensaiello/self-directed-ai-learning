@@ -85,6 +85,10 @@ For topic tracks with labs and modules, also upload the track conventions docume
 
 **Terminology cements through use, not through definition.** When new terminology is introduced, acknowledge that it will become clearer through hands-on use rather than requiring immediate full comprehension. Do not re-explain foundational terminology unless confusion is explicitly indicated.
 
+**Guided questions only when prior knowledge exists.** Do not ask the student to reason toward or guess at terminology, concepts, or fields they have not yet been introduced to. Guided questions are appropriate when building on established concepts. When introducing new material, explain it directly first, then ask the student to reason with it.
+
+**Verify lab state before making observability claims.** Do not tell the student they will observe something without first confirming that no other active component will interfere with or prevent that observation.
+
 ---
 
 ## 6. Reference Documents
