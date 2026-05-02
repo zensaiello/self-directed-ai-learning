@@ -1,0 +1,310 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zenoss-config
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+data:
+  # -----------------------------------------------------------------------
+  # Service DNS endpoints
+  # Replaces ControlCenter Context variables which used 127.0.0.1 as
+  # placeholders that were rewritten at container startup by the CC mux.
+  # In Kubernetes these are stable ClusterDNS names that work at any
+  # replica count without manifest changes.
+  # -----------------------------------------------------------------------
+
+  amqphost: "rabbitmq.zenoss.svc.cluster.local"
+  amqpport: "5672"
+  amqpuser: "zenoss"
+  amqpvhost: "/zenoss"
+  amqpadminport: "15672"
+  amqpadminusessl: "0"
+  amqpusessl: "0"
+
+  zodb-host: "mariadb.zenoss.svc.cluster.local"
+  zodb-port: "3306"
+  zodb-user: "zenoss"
+  zodb-db: "zodb"
+  zodb-db-type: "mysql"
+  zodb-admin-user: "root"
+  zodb-cacheservers: "memcached.zenoss.svc.cluster.local:11211"
+  zodb-cachesize: "1000"
+  zodb-cache-max-object-size: "1048576"
+
+  zep-host: "zeneventserver.zenoss.svc.cluster.local"
+  zep-port: "3306"
+  zep-uri: "http://zeneventserver.zenoss.svc.cluster.local:8084"
+  zep-user: "zenoss"
+  zep-db: "zenoss_zep"
+  zep-db-type: "mysql"
+  zep-admin-user: "root"
+
+  zauth-username: "zenoss_system"
+
+  solr-host: "solr.zenoss.svc.cluster.local"
+  solr-port: "8983"
+  solr-search-limit: "10000"
+
+  # ZooKeeper is referenced as a headless service so clients get the full
+  # list of pod IPs via DNS. This works correctly at 1, 3, or 5 replicas.
+  zookeeper-host: "zookeeper.zenoss.svc.cluster.local"
+  zookeeper-port: "2181"
+
+  zenhub-host: "zenhub.zenoss.svc.cluster.local"
+  zenhub-port: "8789"
+  zenhub-rpc-port: "8081"
+
+  redis-host: "redis.zenoss.svc.cluster.local"
+  redis-port: "6379"
+
+  # collectorredis is a separate Redis instance used exclusively by
+  # collector daemons. It is distinct from the main redis service.
+  collector-redis-host: "collectorredis.zenoss.svc.cluster.local"
+  collector-redis-port: "6379"
+
+  memcached-host: "memcached.zenoss.svc.cluster.local"
+  memcached-port: "11211"
+
+  # memcached-session is a dedicated Memcached instance for Zope session
+  # storage. Kept separate from the object cache by design.
+  memcached-session-host: "memcached-session.zenoss.svc.cluster.local"
+  memcached-session-port: "11211"
+
+  centralquery-host: "centralquery.zenoss.svc.cluster.local"
+  centralquery-port: "8888"
+  centralquery-ratecutoff: "-1"
+
+  metric-consumer-host: "metricconsumer.zenoss.svc.cluster.local"
+  metric-consumer-port: "8443"
+
+  opentsdb-host: "opentsdb.zenoss.svc.cluster.local"
+  opentsdb-reader-port: "4242"
+  opentsdb-writer-port: "4242"
+
+  # HBase table prefix replaces the ControlCenter service ID UUID that
+  # was used as a unique prefix in the original opentsdb.conf template.
+  # Using a stable string means tables survive pod restarts and rebuilds.
+  opentsdb-table-prefix: "zenoss"
+
+  # -----------------------------------------------------------------------
+  # global.conf
+  # ControlCenter generated this file at container startup by iterating
+  # all Context keys prefixed with "global.conf." and writing them as
+  # "key value" pairs. We pre-render it here with real DNS names.
+  # This ConfigMap entry is mounted at /opt/zenoss/etc/global.conf in
+  # every Zenoss application container.
+  # -----------------------------------------------------------------------
+  global.conf: |
+    # Generated for Kubernetes deployment
+    # Source: zenoss-config ConfigMap
+    # Replaces: ControlCenter Context-based global.conf generation
+    amqphost rabbitmq.zenoss.svc.cluster.local
+    amqpport 5672
+    amqpuser zenoss
+    amqpvhost /zenoss
+    amqpadminport 15672
+    amqpadminusessl 0
+    amqpusessl 0
+    zodb-host mariadb.zenoss.svc.cluster.local
+    zodb-port 3306
+    zodb-user zenoss
+    zodb-db zodb
+    zodb-db-type mysql
+    zodb-admin-user root
+    zodb-cacheservers memcached.zenoss.svc.cluster.local:11211
+    zodb-cachesize 1000
+    zodb-cache-max-object-size 1048576
+    zep-host zeneventserver.zenoss.svc.cluster.local
+    zep-port 3306
+    zep-uri http://zeneventserver.zenoss.svc.cluster.local:8084
+    zep-user zenoss
+    zep-db zenoss_zep
+    zep-db-type mysql
+    zep-admin-user root
+    solr-search-limit 10000
+    zauth-username zenoss_system
+
+  # -----------------------------------------------------------------------
+  # zookeeper.cfg
+  # ControlCenter templated clientPort and server entries using .InstanceID.
+  # We use the standard port 2181 and reference peers by StatefulSet DNS.
+  # The server entries use the headless service pattern:
+  #   <pod-name>.<service-name>.<namespace>.svc.cluster.local
+  # This file is valid for 1 replica today and for 3 replicas when scaled.
+  # When scaling to 3, update server.2 and server.3 entries and rolling
+  # restart — no other changes needed.
+  # -----------------------------------------------------------------------
+  zookeeper.cfg: |
+    tickTime=2000
+    dataDir=/var/lib/zookeeper
+    clientPort=2181
+    initLimit=5
+    syncLimit=2
+    server.1=zookeeper-0.zookeeper.zenoss.svc.cluster.local:2888:3888
+    server.2=zookeeper-1.zookeeper.zenoss.svc.cluster.local:2888:3888
+    server.3=zookeeper-2.zookeeper.zenoss.svc.cluster.local:2888:3888
+    autopurge.snapRetainCount=3
+    autopurge.purgeInterval=1
+
+  # -----------------------------------------------------------------------
+  # hbase-site.xml
+  # ZooKeeper quorum uses the headless service DNS name so HBase discovers
+  # all ZooKeeper pods regardless of replica count.
+  # -----------------------------------------------------------------------
+  hbase-site.xml: |
+    <configuration>
+      <property>
+        <name>hbase.rootdir</name>
+        <value>file:///var/hbase</value>
+      </property>
+      <property>
+        <name>hbase.cluster.distributed</name>
+        <value>true</value>
+      </property>
+      <property>
+        <name>hbase.zookeeper.quorum</name>
+        <value>zookeeper.zenoss.svc.cluster.local</value>
+      </property>
+      <property>
+        <name>hbase.zookeeper.property.clientPort</name>
+        <value>2181</value>
+      </property>
+    </configuration>
+
+  # -----------------------------------------------------------------------
+  # opentsdb.conf
+  # Table names use the stable prefix defined in opentsdb-table-prefix.
+  # ZooKeeper quorum uses the headless service DNS name.
+  # Replaces ControlCenter template:
+  #   tsd.storage.hbase.data_table = {{(parent (parent .)).ID}}-tsdb
+  #   tsd.storage.hbase.zk_quorum  = 127.0.0.1:2181
+  # -----------------------------------------------------------------------
+  opentsdb.conf: |
+    tsd.core.auto_create_metrics = True
+    tsd.core.uid.random_metrics  = True
+    tsd.storage.hbase.data_table = zenoss-tsdb
+    tsd.storage.hbase.uid_table  = zenoss-tsdb-uid
+    tsd.storage.hbase.meta_table = zenoss-tsdb-meta
+    tsd.storage.hbase.tree_table = zenoss-tsdb-tree
+    tsd.storage.hbase.zk_quorum  = zookeeper.zenoss.svc.cluster.local:2181
+    tsd.storage.fix_duplicates   = True
+    tsd.storage.enable_compaction = False
+    tsd.http.cachedir            = /tmp/tsd
+    tsd.http.staticroot          = /opt/opentsdb/build/staticroot
+    tsd.network.port             = 4242
+    tsd.query.skip_unresolved_tagvs = True
+
+  # -----------------------------------------------------------------------
+  # rabbitmq-env.conf
+  # Node naming uses StatefulSet pod DNS for stable cluster identity.
+  # Replaces ControlCenter template:
+  #   NODENAME=rabbit@rbt{{.InstanceID}}
+  # Each RabbitMQ pod sets its own NODENAME via the Downward API in the
+  # StatefulSet — this file sets the non-instance-specific defaults.
+  # -----------------------------------------------------------------------
+  rabbitmq-env.conf: |
+    NODE_IP_ADDRESS=0.0.0.0
+    RABBITMQ_MNESIA_BASE=/var/lib/rabbitmq/mnesia
+
+  # -----------------------------------------------------------------------
+  # rabbitmq.config
+  # Cluster nodes reference StatefulSet pod DNS names.
+  # Replaces ControlCenter template that built the cluster_nodes list
+  # dynamically from .Instances. Adding replicas requires updating this
+  # list and performing a rolling restart of the StatefulSet.
+  # -----------------------------------------------------------------------
+  rabbitmq.config: |
+    [
+      {rabbit, [
+        {log_levels, [{connection, error}]},
+        {cluster_nodes, {[
+          'rabbit@rabbitmq-0.rabbitmq.zenoss.svc.cluster.local',
+          'rabbit@rabbitmq-1.rabbitmq.zenoss.svc.cluster.local',
+          'rabbit@rabbitmq-2.rabbitmq.zenoss.svc.cluster.local'
+        ], disc}}
+      ]},
+      {kernel, [
+        {inet_dist_listen_max, 44001},
+        {inet_dist_listen_min, 44001}
+      ]}
+    ].
+
+  # -----------------------------------------------------------------------
+  # solr.in.sh
+  # ZooKeeper host uses ClusterDNS. The /solr chroot keeps Solr's
+  # ZooKeeper data separate from HBase's ZooKeeper data.
+  # Replaces ControlCenter template:
+  #   ZK_HOST=127.0.0.1:2181/solr
+  # RAM is set explicitly rather than derived from .RAMCommitment template.
+  # -----------------------------------------------------------------------
+  solr.in.sh: |
+    ZK_HOST=zookeeper.zenoss.svc.cluster.local:2181/solr
+    SOLR_JAVA_MEM="-Xmx1g"
+
+  # -----------------------------------------------------------------------
+  # metricshipper.yaml
+  # Replaces ControlCenter template references for auth and endpoints.
+  # redisurl points to collectorredis (collector-tier Redis).
+  # consumerurl points to MetricConsumer via ClusterDNS.
+  # Password is injected at runtime from the zenoss-secrets Secret.
+  # -----------------------------------------------------------------------
+  metricshipper.yaml: |
+    redisurl: redis://collectorredis.zenoss.svc.cluster.local:6379/0/metrics2
+    consumerurl: ws://metricconsumer.zenoss.svc.cluster.local:8443/ws/metrics/store
+    username: zenoss_system
+
+  # -----------------------------------------------------------------------
+  # central-query-configuration.yaml
+  # Replaces ControlCenter template:
+  #   openTsdbUrl: http://127.0.0.1:4242
+  # Uses opentsdb-reader service for read queries.
+  # -----------------------------------------------------------------------
+  central-query-configuration.yaml: |
+    authEnabled: true
+    logging:
+      level: INFO
+      loggers:
+        "org.zenoss": INFO
+    metrics:
+      defaultReturnSet: EXACT
+      defaultStartTime: 1h-ago
+      defaultEndTime: now
+      defaultSeries: true
+      openTsdbUrl: http://opentsdb-reader.zenoss.svc.cluster.local:4242
+      defaultTsdTimeZone: UTC
+      connectionTimeoutMs: 20000
+      sendRateOptions: false
+      ignoreRateOption: true
+      rateOptionCutoffTs: -1
+
+  # -----------------------------------------------------------------------
+  # metric-consumer-configuration.yaml
+  # Replaces ControlCenter metric-consumer-app/configuration.yaml.
+  # Uses opentsdb-writer service for metric writes.
+  # SSL keystore path remains as baked into the container image.
+  # -----------------------------------------------------------------------
+  metric-consumer-configuration.yaml: |
+    authEnabled: true
+    logging:
+      level: INFO
+    http:
+      port: 8443
+      adminPort: 58443
+      connectorType: nonblocking
+      ssl:
+        keyStore: etc/metric-consumer-app/cert/ssl.pfx
+        keyStorePassword: zapp_pass
+        keyStoreType: pkcs12
+      requestLog:
+        console:
+          enabled: false
+    webSocketConfiguration:
+      maxTextMessageSize: 10485760
+    metricService:
+      jobSize: 1000
+      highCollisionMark: 2000000
+      maxClientWaitTime: 60000
+      minTimeBetweenBroadcast: 200
+      tsdbWriterThreads: 1
+      writerURL: http://opentsdb-writer.zenoss.svc.cluster.local:4242/api/put
