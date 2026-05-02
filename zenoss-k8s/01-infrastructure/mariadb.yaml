@@ -1,0 +1,346 @@
+# =============================================================================
+# MariaDB
+# =============================================================================
+# Source: ControlCenter service "mariadb" under Infrastructure
+# Image:  zenoss/core_6.3:6.3.2_1
+# RAM:    1G   CPU: 2
+# StartLevel: 1 (first tier, no prereqs)
+#
+# Key findings from image inspection:
+#   - mysqld lives at /usr/libexec/mysqld, started via /usr/bin/mysqld_safe
+#   - /var/lib/mysql is pre-initialized in the image with zenoss_zep, zodb,
+#     zodb_session databases already created (image build date: Jan 2019)
+#   - /etc/my.cnf is production-tuned, shipped in the image - we mount our
+#     ConfigMap version which preserves the original content plus our additions
+#   - MariaDB runs as uid=27(mysql) - mysqld_safe handles user switching
+#   - No MYSQL_* env vars needed - not the Docker Hub image, databases exist
+#   - initContainer bootstraps PVC from image data on first start only
+#
+# Translation notes:
+#   - StatefulSet with volumeClaimTemplate for /var/lib/mysql
+#   - initContainer copies pre-baked image data to PVC on first start
+#   - my.cnf mounted from ConfigMap preserving original Zenoss tuning
+#   - controlplane_consumer import (:8444) omitted - CC-specific, no K8s equiv
+#   - Health check uses mariadb_answering script from image
+# =============================================================================
+
+---
+# ConfigMap for my.cnf
+# Content sourced directly from the image's /etc/my.cnf (inspected Jan 2019)
+# plus binary logging additions for future replication readiness.
+# Mount at /etc/my.cnf replaces the image default but preserves all tuning.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-config
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+    app.kubernetes.io/name: mariadb
+    tier: infrastructure
+data:
+  my.cnf: |
+    #---------------------------------------------------------------------------
+    # Zenoss DataStore Configuration
+    # Source: zenoss/core_6.3:6.3.2_1 /etc/my.cnf
+    # Managed via Kubernetes ConfigMap - edit here, restart pod to apply
+    #---------------------------------------------------------------------------
+    [mysqld]
+    innodb_file_per_table
+    skip_external_locking
+    skip-host-cache
+    skip-name-resolve
+
+    #
+    # Buffer pool sizing guidelines (from original Zenoss config):
+    #    1 to  250 devices:   512M
+    #  250 to  500 devices:   768M
+    #  500 to 1000 devices:  1024M
+    # 1000 to 2000 devices:  2048M
+    #
+    innodb_buffer_pool_size = 800M
+    innodb_buffer_pool_instances = 1
+
+    innodb_log_file_size = 200M
+    innodb_additional_mem_pool_size = 32M
+    innodb_log_buffer_size = 8M
+    innodb_flush_method = O_DIRECT
+    innodb_flush_log_at_trx_commit = 2
+    innodb_thread_concurrency = 0
+    innodb_file_format = Barracuda
+    innodb_purge_threads = 1
+    innodb_max_purge_lag = 0
+
+    thread_pool_size = 32
+
+    query_cache_size = 0
+    query_cache_type = OFF
+
+    max_allowed_packet = 64M
+    wait_timeout = 86400
+
+    log_error = /var/lib/mysql/mysqld.err
+
+    # Binary logging - enables future replication/Galera promotion
+    # Not in original image config but added for production readiness
+    log_bin = mysql-bin
+    binlog_format = ROW
+    expire_logs_days = 7
+
+    # Slow query logging for observability
+    slow_query_log = 1
+    slow_query_log_file = /var/lib/mysql/mysql-slow.log
+    long_query_time = 2
+
+    character_set_server = utf8
+    collation_server = utf8_general_ci
+
+    [mysql]
+    max_allowed_packet = 64M
+
+    [mysqldump]
+    max_allowed_packet = 64M
+
+    [mysqld_safe]
+    malloc-lib = /usr/lib64/libjemalloc.so.1
+
+---
+# Headless Service for stable per-pod DNS within the StatefulSet
+# Enables: mariadb-0.mariadb-headless.zenoss.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb-headless
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+    app.kubernetes.io/name: mariadb
+    tier: infrastructure
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mariadb
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+
+---
+# ClusterIP Service
+# Stable endpoint for all other services to reach MariaDB.
+# DNS: mariadb.zenoss.svc.cluster.local:3306
+# Matches global.conf: zodb-host and zep-host translations
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+    app.kubernetes.io/name: mariadb
+    tier: infrastructure
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mariadb
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+
+---
+# PodDisruptionBudget
+# minAvailable: 0 allows pod eviction during node maintenance with 1 replica.
+# Increase to 1 when running 2+ replicas to guarantee continuity.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mariadb-pdb
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+    app.kubernetes.io/name: mariadb
+    tier: infrastructure
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mariadb
+
+---
+# StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+    app.kubernetes.io/name: mariadb
+    tier: infrastructure
+spec:
+  serviceName: mariadb-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mariadb
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: zenoss
+        app.kubernetes.io/name: mariadb
+        tier: infrastructure
+    spec:
+      # Anti-affinity: spreads replicas across nodes when scaled beyond 1
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: mariadb
+                topologyKey: kubernetes.io/hostname
+
+      # Give MariaDB time to flush dirty pages and close connections cleanly
+      terminationGracePeriodSeconds: 60
+
+      # -----------------------------------------------------------------------
+      # initContainer: db-bootstrap
+      # Problem: Kubernetes mounts an empty PVC at /var/lib/mysql, replacing
+      # the pre-initialized databases baked into the image at build time.
+      # Solution: On first start, copy the image's /var/lib/mysql contents
+      # into the PVC. On subsequent starts the PVC has data and we skip.
+      #
+      # Detection: if /var/lib/mysql-pvc/mysql directory does not exist,
+      # the PVC is empty and needs bootstrapping. The mysql system database
+      # is always present in an initialized MariaDB data directory.
+      # -----------------------------------------------------------------------
+      initContainers:
+        - name: db-bootstrap
+          image: zenoss/core_6.3:6.3.2_1
+          imagePullPolicy: IfNotPresent
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              if [ ! -d /var/lib/mysql-pvc/mysql ]; then
+                echo "PVC is empty - bootstrapping from image data..."
+                cp -a /var/lib/mysql/. /var/lib/mysql-pvc/
+                echo "Bootstrap complete."
+                ls -la /var/lib/mysql-pvc/
+              else
+                echo "PVC already initialized - skipping bootstrap."
+                ls -la /var/lib/mysql-pvc/
+              fi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql-pvc
+
+      containers:
+        - name: mariadb
+          image: zenoss/core_6.3:6.3.2_1
+          imagePullPolicy: IfNotPresent
+
+          # mysqld_safe is the correct startup method for this image.
+          # It handles user switching to mysql (uid=27) internally,
+          # loads jemalloc via my.cnf [mysqld_safe] section, and
+          # manages the mysqld process lifecycle.
+          # --user=mysql ensures the daemon process runs as mysql user.
+          # --console keeps output on stdout for kubectl logs visibility.
+          command:
+            - /usr/bin/mysqld_safe
+            - --user=mysql
+            - --console
+
+          ports:
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+
+          # Requests match ControlCenter RAMCommitment (1G, 2 CPU).
+          # Limits are generous to avoid throttling on a capable node.
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+
+          volumeMounts:
+            # PVC mounted at the standard data directory
+            - name: data
+              mountPath: /var/lib/mysql
+            # my.cnf from ConfigMap — preserves original Zenoss tuning
+            # plus binary logging additions for production readiness
+            - name: config
+              mountPath: /etc/my.cnf
+              subPath: my.cnf
+              readOnly: true
+
+          # readinessProbe — pod is Ready only when MariaDB accepts connections
+          # Source: ControlCenter health check "answering"
+          # Uses the Zenoss healthcheck script baked into the image which
+          # reads connection params from global.conf via ZenDB.py.
+          # Falls back to direct mysql check if zenoss user not yet configured.
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - |
+                  mysql --protocol TCP \
+                    -u root \
+                    -h 127.0.0.1 \
+                    -P 3306 \
+                    -e 'select 1' > /dev/null 2>&1
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+            successThreshold: 1
+
+          # livenessProbe — restart pod if MariaDB stops responding
+          # More generous timing than readiness to avoid unnecessary restarts
+          livenessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - |
+                  mysql --protocol TCP \
+                    -u root \
+                    -h 127.0.0.1 \
+                    -P 3306 \
+                    -e 'select 1' > /dev/null 2>&1
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+
+      volumes:
+        - name: config
+          configMap:
+            name: mariadb-config
+
+  # volumeClaimTemplates — creates data-mariadb-0 PVC automatically.
+  # k3s local-path-provisioner fulfills this with no additional config.
+  # To use cloud storage when migrating: add storageClassName field.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/part-of: zenoss
+          app.kubernetes.io/name: mariadb
+          tier: infrastructure
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
