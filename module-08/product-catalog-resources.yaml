@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "3"
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"labels":{"app":"product-catalog"},"name":"product-catalog","namespace":"default"},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"product-catalog"}},"template":{"metadata":{"labels":{"app":"product-catalog"}},"spec":{"containers":[{"args":["-text=product-catalog service - version 1.0"],"envFrom":[{"configMapRef":{"name":"product-catalog-config"}}],"image":"hashicorp/http-echo:0.2.3","name":"product-catalog","ports":[{"containerPort":5678}]}],"serviceAccountName":"product-catalog-sa"}}}}
+  creationTimestamp: "2026-04-24T14:23:54Z"
+  generation: 3
+  labels:
+    app: product-catalog
+  name: product-catalog
+  namespace: default
+  resourceVersion: "114020"
+  uid: fa196002-6f96-4c79-ad29-3953246de3fa
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 2
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: product-catalog
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: product-catalog
+    spec:
+      containers:
+      - args:
+        - -text=product-catalog service - version 1.0
+        envFrom:
+        - configMapRef:
+            name: product-catalog-config
+        image: hashicorp/http-echo:0.2.3
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+        imagePullPolicy: IfNotPresent
+        name: product-catalog
+        ports:
+        - containerPort: 5678
+          protocol: TCP
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: product-catalog-sa
+      serviceAccountName: product-catalog-sa
+      terminationGracePeriodSeconds: 30
+status:
+  availableReplicas: 2
+  conditions:
+  - lastTransitionTime: "2026-04-24T14:23:57Z"
+    lastUpdateTime: "2026-04-24T14:23:57Z"
+    message: Deployment has minimum availability.
+    reason: MinimumReplicasAvailable
+    status: "True"
+    type: Available
+  - lastTransitionTime: "2026-04-24T14:23:54Z"
+    lastUpdateTime: "2026-04-29T11:24:48Z"
+    message: ReplicaSet "product-catalog-875469fb" has successfully progressed.
+    reason: NewReplicaSetAvailable
+    status: "True"
+    type: Progressing
+  observedGeneration: 3
+  readyReplicas: 2
+  replicas: 2
+  updatedReplicas: 2
