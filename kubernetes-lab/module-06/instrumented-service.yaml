@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-demo
+  labels:
+    app: metrics-demo
+    component: ecommerce-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: metrics-demo
+  template:
+    metadata:
+      labels:
+        app: metrics-demo
+        component: ecommerce-demo
+    spec:
+      containers:
+        - name: metrics-demo
+          image: quay.io/prometheuscommunity/example-app:v0.4.0
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-demo
+  labels:
+    app: metrics-demo
+    component: ecommerce-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: metrics-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: metrics-demo
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - default
+  selector:
+    matchLabels:
+      app: metrics-demo
+  endpoints:
+    - port: http
+      interval: 15s
+      path: /metrics
