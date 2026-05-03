@@ -1,0 +1,269 @@
+# OpenTSDB — Tier 02: Data
+#
+# Source: zenoss/opentsdb:24.0.8
+# CC Command: /bin/sh -c "{{ if eq .InstanceID 0 }} export CREATE_TABLES=1;{{ end }}
+#             /opt/opentsdb/start-opentsdb.sh <zk-list>"
+# CC Instances: Min 1
+# CC RAMCommitment: 256M
+# CC Endpoints: opentsdb-reader (export 4242), opentsdb-writer (export 4242)
+#
+# Key translation decisions:
+# - CREATE_TABLES=1: CC set this only on instance 0. Since we have 1 replica
+#   (pod opentsdb-0) it is always instance 0. We set CREATE_TABLES=1 via env var
+#   so HBase tables are created on first start. This is idempotent — if tables
+#   exist, the script skips creation.
+# - ZK quorum argument: CC computed localhost:2181,localhost:2182,... by iterating
+#   ZooKeeper instances and using port offsets. With a single ZK at standard port:
+#   zookeeper.zenoss.svc.cluster.local:2181
+# - opentsdb.conf: CC used the parent service ID as the table prefix:
+#   "{{(parent (parent .)).ID}}-tsdb". The configmap pre-renders this as
+#   "zenoss-tsdb". ConfigMap key: opentsdb.conf
+# - Two Services (opentsdb-reader, opentsdb-writer): Both export port 4242 in CC.
+#   Same pod serves both — we create two ClusterIP Services pointing to the same pods.
+#   This satisfies downstream configs referencing these DNS names specifically.
+# - CC Prereq: wget to HMaster :61000 checking for "1 live servers".
+#   Must confirm RegionServer is registered before OpenTSDB tries to connect.
+# - logback.xml: CC injected this to configure logging to stdout (STDOUT appender)
+#   and to a rolling file. In Kubernetes we configure logging to stdout only via
+#   a ConfigMap-mounted logback.xml. The file appender is removed since Kubernetes
+#   log collection reads stdout/stderr.
+# - No persistent volumes needed: OpenTSDB is stateless — all data lives in HBase.
+#   /tmp/tsd is used for HTTP cache, emptyDir is sufficient.
+
+---
+# opentsdb-reader: used by central-query for metric reads
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentsdb-reader
+  namespace: zenoss
+  labels:
+    app: opentsdb
+    tier: data
+spec:
+  selector:
+    app: opentsdb
+  ports:
+    - name: http
+      port: 4242
+      targetPort: 4242
+
+---
+# opentsdb-writer: used by metric-consumer for metric writes
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentsdb-writer
+  namespace: zenoss
+  labels:
+    app: opentsdb
+    tier: data
+spec:
+  selector:
+    app: opentsdb
+  ports:
+    - name: http
+      port: 4242
+      targetPort: 4242
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: opentsdb-pdb
+  namespace: zenoss
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: opentsdb
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opentsdb
+  namespace: zenoss
+  labels:
+    app: opentsdb
+    tier: data
+spec:
+  serviceName: opentsdb
+  replicas: 1
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: opentsdb
+  template:
+    metadata:
+      labels:
+        app: opentsdb
+        tier: data
+    spec:
+      securityContext:
+        runAsUser: 0
+      terminationGracePeriodSeconds: 30
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: opentsdb
+                topologyKey: kubernetes.io/hostname
+
+      initContainers:
+        # Wait for ZooKeeper — OpenTSDB connects to ZK to discover HBase topology.
+        - name: wait-for-zookeeper
+          image: zenoss/opentsdb:24.0.8
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for ZooKeeper..."
+              until { echo ruok; sleep 1; } | nc zookeeper.zenoss.svc.cluster.local 2181 | grep -q imok; do
+                echo "ZooKeeper not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "ZooKeeper is up."
+
+        # Wait for HMaster REST API to be available.
+        - name: wait-for-hmaster
+          image: zenoss/opentsdb:24.0.8
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for HMaster REST API..."
+              until wget -q -O /dev/null http://hmaster.zenoss.svc.cluster.local:61000/status/cluster; do
+                echo "HMaster not ready, retrying in 10s..."
+                sleep 10
+              done
+              echo "HMaster is up."
+
+        # CC Prereq: "HBase Regionservers up"
+        # Script: wget -q -O- http://localhost:61000/status/cluster | grep '1 live servers'
+        # Translated: check HMaster REST API confirms at least 1 live RegionServer.
+        - name: wait-for-regionserver
+          image: zenoss/opentsdb:24.0.8
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for RegionServer to be registered with HMaster..."
+              until wget -q -O - http://hmaster.zenoss.svc.cluster.local:61000/status/cluster | grep -q 'live servers'; do
+                echo "No live RegionServers yet, retrying in 10s..."
+                sleep 10
+              done
+              echo "RegionServer is registered."
+
+        # Inject opentsdb.conf from ConfigMap.
+        # CC injected /opt/zenoss/etc/opentsdb/opentsdb.conf via ConfigFiles.
+        # logback.xml is also injected, configured for stdout only.
+        - name: config-init
+          image: zenoss/opentsdb:24.0.8
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              mkdir -p /opt/zenoss/etc/opentsdb /opt/opentsdb/src /tmp/tsd
+
+              echo "Writing opentsdb.conf..."
+              cp /config/opentsdb.conf /opt/zenoss/etc/opentsdb/opentsdb.conf
+              chmod 0644 /opt/zenoss/etc/opentsdb/opentsdb.conf
+
+              echo "Writing logback.xml..."
+              cp /config/opentsdb-logback.xml /opt/opentsdb/src/logback.xml
+              chmod 0644 /opt/opentsdb/src/logback.xml
+
+              echo "Configs written."
+              ls -la /opt/zenoss/etc/opentsdb/ /opt/opentsdb/src/logback.xml
+          volumeMounts:
+            - name: config-source
+              mountPath: /config
+            - name: opentsdb-config
+              mountPath: /opt/zenoss/etc/opentsdb
+            - name: opentsdb-logback
+              mountPath: /opt/opentsdb/src
+            - name: tsd-cache
+              mountPath: /tmp/tsd
+
+      containers:
+        - name: opentsdb
+          image: zenoss/opentsdb:24.0.8
+          # CC Command: export CREATE_TABLES=1; /opt/opentsdb/start-opentsdb.sh <zk-list>
+          # ZK quorum: zookeeper.zenoss.svc.cluster.local:2181
+          command:
+            - /bin/sh
+            - -c
+            - |
+              exec /opt/opentsdb/start-opentsdb.sh \
+                zookeeper.zenoss.svc.cluster.local:2181
+          resources:
+            requests:
+              memory: "256Mi"   # CC RAMCommitment: 256M
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          env:
+            # CC sets CREATE_TABLES=1 on instance 0. We always set it.
+            # start-opentsdb.sh checks this env var and runs mkmetrics.sh if set.
+            # Idempotent — safe to run on every restart.
+            - name: CREATE_TABLES
+              value: "1"
+            - name: TSDB_JAVA_MEM_MB
+              value: "-Xmx256m"   # CC: -Xmx{{bytesToMB .RAMCommitment}}m = -Xmx256m
+          ports:
+            - name: http
+              containerPort: 4242
+          volumeMounts:
+            - name: opentsdb-config
+              mountPath: /opt/zenoss/etc/opentsdb/opentsdb.conf
+              subPath: opentsdb.conf
+            - name: opentsdb-logback
+              mountPath: /opt/opentsdb/src/logback.xml
+              subPath: logback.xml
+            - name: tsd-cache
+              mountPath: /tmp/tsd
+          readinessProbe:
+            # CC HealthCheck answering: wget --timeout=3 -q -O - http://localhost:4242/api/stats
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "wget --timeout=3 --tries=1 -q -O /dev/null http://localhost:4242/api/stats"
+            initialDelaySeconds: 60    # Table creation on first start takes time
+            periodSeconds: 15
+            failureThreshold: 8
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "wget --timeout=3 --tries=1 -q -O /dev/null http://localhost:4242/api/stats"
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 5
+
+      volumes:
+        - name: config-source
+          configMap:
+            name: zenoss-config
+            items:
+              - key: opentsdb.conf
+                path: opentsdb.conf
+              - key: opentsdb-logback.xml
+                path: opentsdb-logback.xml
+        - name: opentsdb-config
+          emptyDir: {}
+        - name: opentsdb-logback
+          emptyDir: {}
+        - name: tsd-cache
+          emptyDir: {}
+        # No volumeClaimTemplates — OpenTSDB is stateless.
+        # All metric data lives in HBase (/var/hbase on the RegionServer PVC).

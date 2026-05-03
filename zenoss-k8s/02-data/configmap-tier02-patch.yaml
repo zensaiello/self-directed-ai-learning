@@ -1,0 +1,156 @@
+# ConfigMap additions for Tier 02: Data
+#
+# Apply this patch with:
+#   kubectl apply -f configmap-tier02-patch.yaml
+#
+# These keys are added to the zenoss-config ConfigMap.
+# The existing configmap.yaml should be updated with these entries
+# and committed to git.
+#
+# Keys added:
+#   zookeeper.cfg     - ZooKeeper configuration (scale-ready, 3 server entries)
+#   hbase-site.xml    - HBase config shared by HMaster and RegionServer
+#   hbase-env.sh      - HBase JVM settings (shared by HMaster and RegionServer)
+#   opentsdb.conf     - OpenTSDB configuration with real ZK and table names
+#   opentsdb-logback.xml - Logging config: stdout only (no file appenders in K8s)
+#
+# Template substitutions performed:
+#   {{plus 2181 .InstanceID}} -> 2181  (single instance, InstanceID=0)
+#   {{range ...server.N...}} -> 3 potential server entries using headless DNS
+#   zk1 (hbase.zookeeper.quorum) -> zookeeper.zenoss.svc.cluster.local
+#   {{(parent (parent .)).ID}}-tsdb -> zenoss-tsdb  (established in Tier 01 configmap)
+#   {{with $zks...}}127.0.0.1:2181 -> zookeeper.zenoss.svc.cluster.local:2181
+#   {{getContext . "tsd.storage.enable_compaction"}} -> False  (safe default)
+#   {{percentScale (bytesToMB .RAMCommitment) 0.9}} -> 921 (for 1G RAMCommitment)
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zenoss-config
+  namespace: zenoss
+data:
+  # -------------------------------------------------------------------------
+  # ZooKeeper configuration
+  # -------------------------------------------------------------------------
+  # CC source: ZooKeeper ConfigFiles["/etc/zookeeper.cfg"]
+  # Template rendered for single instance (InstanceID=0):
+  #   clientPort: 2181 (plus 2181 0)
+  #   server entries: scale-ready with headless DNS for pods 0..2
+  #     In CC the server addresses were 127.0.0.1 because all pods ran on localhost
+  #     in CC's virtual network. In Kubernetes we use the per-pod headless DNS:
+  #     zookeeper-N.zookeeper.zenoss.svc.cluster.local
+  # The server.N entries are all present — ZK ignores entries for peers that
+  # don't exist yet; they only become active when those pods come up.
+  zookeeper.cfg: |
+    tickTime=2000
+    dataDir=/var/lib/zookeeper
+    clientPort=2181
+    initLimit=5
+    syncLimit=2
+
+    server.1=zookeeper-0.zookeeper.zenoss.svc.cluster.local:2888:3888
+    server.2=zookeeper-1.zookeeper.zenoss.svc.cluster.local:2888:3888
+    server.3=zookeeper-2.zookeeper.zenoss.svc.cluster.local:2888:3888
+
+    autopurge.snapRetainCount=3
+    autopurge.purgeInterval=1
+
+  # -------------------------------------------------------------------------
+  # HBase configuration (shared by HMaster and RegionServer)
+  # -------------------------------------------------------------------------
+  # CC source: HMaster ConfigFiles["/etc/hbase-site.xml"]
+  # Substitutions:
+  #   hbase.zookeeper.quorum: "zk1" -> "zookeeper.zenoss.svc.cluster.local"
+  #   (CC's virtual address zk1 was a round-robin alias for all ZK instances;
+  #    in Kubernetes we use the ClusterIP service which provides the same function)
+  hbase-site.xml: |
+    <configuration>
+      <property>
+        <name>hbase.rootdir</name>
+        <value>file:///var/hbase</value>
+      </property>
+      <property>
+        <name>hbase.cluster.distributed</name>
+        <value>true</value>
+      </property>
+      <property>
+        <name>hbase.zookeeper.quorum</name>
+        <value>zookeeper.zenoss.svc.cluster.local</value>
+      </property>
+      <property>
+        <name>hbase.zookeeper.property.clientPort</name>
+        <value>2181</value>
+      </property>
+    </configuration>
+
+  # -------------------------------------------------------------------------
+  # HBase JVM environment (shared by HMaster and RegionServer)
+  # -------------------------------------------------------------------------
+  # CC source: HMaster ConfigFiles["/etc/hbase-env.sh"]
+  # HBASE_MANAGES_ZK=false: HBase must not start its own ZK (we run it separately)
+  # HBASE_HEAPSIZE: {{percentScale (bytesToMB 1G) 0.9}} = 921MB
+  # Passed as env var HBASE_HEAPSIZE in manifests, but also provided here
+  # as a config file for completeness.
+  hbase-env.sh: |
+    export HBASE_MANAGES_ZK=false
+    export HBASE_HEAPSIZE=921
+
+  # -------------------------------------------------------------------------
+  # OpenTSDB configuration
+  # -------------------------------------------------------------------------
+  # CC source: opentsdb ConfigFiles["/opt/zenoss/etc/opentsdb/opentsdb.conf"]
+  # Substitutions:
+  #   {{(parent (parent .)).ID}}-tsdb -> zenoss-tsdb  (CC service ID = "zenoss")
+  #   {{with $zks...}}127.0.0.1:2181 -> zookeeper.zenoss.svc.cluster.local:2181
+  #   {{getContext . "tsd.storage.enable_compaction"}} -> False
+  #     (compaction is expensive and was typically disabled in Zenoss deployments;
+  #      can be enabled later if needed by editing this ConfigMap)
+  opentsdb.conf: |
+    tsd.core.auto_create_metrics = True
+    tsd.core.uid.random_metrics  = True
+    tsd.storage.hbase.data_table = zenoss-tsdb
+    tsd.storage.hbase.uid_table  = zenoss-tsdb-uid
+    tsd.storage.hbase.meta_table = zenoss-tsdb-meta
+    tsd.storage.hbase.tree_table = zenoss-tsdb-tree
+    tsd.storage.fix_duplicates   = True
+    tsd.http.cachedir            = /tmp/tsd
+    tsd.http.staticroot          = /opt/opentsdb/build/staticroot
+    tsd.network.port             = 4242
+    tsd.storage.hbase.zk_quorum  = zookeeper.zenoss.svc.cluster.local:2181
+    tsd.storage.enable_compaction = False
+    tsd.query.skip_unresolved_tagvs = True
+
+  # -------------------------------------------------------------------------
+  # OpenTSDB logback configuration — stdout only
+  # -------------------------------------------------------------------------
+  # CC source: opentsdb ConfigFiles["/opt/opentsdb/src/logback.xml"]
+  # Modification: FILE and QUERY_LOG appenders removed.
+  #   CC's logback.xml included both STDOUT and FILE appenders. In Kubernetes,
+  #   all logging must go to stdout/stderr for kubectl logs to work.
+  #   The /logs HTTP endpoint (CYCLIC appender) is retained as it costs little
+  #   and provides useful diagnostics. File paths removed entirely.
+  opentsdb-logback.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <configuration>
+      <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+          <pattern>%date{ISO8601} %-5level [%thread] %logger{0}: %msg%n</pattern>
+        </encoder>
+      </appender>
+
+      <appender name="CYCLIC" class="ch.qos.logback.core.read.CyclicBufferAppender">
+        <MaxSize>1024</MaxSize>
+      </appender>
+
+      <logger name="QueryLog" level="OFF" additivity="false"/>
+      <logger name="org.apache.zookeeper" level="INFO"/>
+      <!-- ZEN-26681 -->
+      <logger name="org.hbase.async" level="WARN"/>
+      <logger name="com.stumbleupon.async" level="WARN"/>
+
+      <root level="INFO">
+        <appender-ref ref="STDOUT"/>
+        <appender-ref ref="CYCLIC"/>
+      </root>
+    </configuration>

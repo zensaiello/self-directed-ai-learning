@@ -1,0 +1,245 @@
+# RegionServer — Tier 02: Data
+#
+# Source: zenoss/hbase:24.0.8
+# CC Command: /usr/bin/run-hbase-regionserver.sh /etc/hbase-site.xml $CONTROLPLANE_INSTANCE_ID
+# CC Instances: Min 1
+# CC RAMCommitment: 1G
+# CC Volume: /var/hbase (shared with HMaster in CC — RegionServer stores region data here)
+# CC Privileged: true
+#
+# Key translation decisions:
+# - $CONTROLPLANE_INSTANCE_ID: CC passed the instance ordinal as the second arg to
+#   the startup script (used to compute the unique RS port offset). With a single
+#   replica we pass "0". If scaling to N replicas, each pod needs its own ordinal
+#   which requires a wrapper script reading the pod hostname — documented in scaling notes.
+# - hbase-site.xml: Same config as HMaster. ZK quorum set to
+#   zookeeper.zenoss.svc.cluster.local. ConfigMap key: hbase-site.xml
+# - /var/hbase storage: In CC both HMaster and RegionServer shared the same
+#   distributed volume. In our single-node local-path setup, both pods need
+#   access to /var/hbase. Since HBase distributed mode stores region data via
+#   ZooKeeper coordination and the HMaster manages assignment, they can use
+#   separate PVCs (the data is keyed by region, not pod). This is correct for
+#   distributed HBase — RegionServer writes its assigned regions to its own PVC.
+# - CC had no explicit Prereqs for RegionServer. However, RegionServer requires
+#   both ZooKeeper (to register itself) and HMaster (to receive region assignments).
+#   We add initContainers for both, using the HMaster REST API as the health signal.
+# - Health check: CC used "echo | nc localhost 60200" — port connectivity only.
+#   We use the same approach for readiness.
+#
+# Scaling note: To scale RegionServers, each instance needs a unique INSTANCE_ID.
+# Pattern: Add a wrapper initContainer that writes a startup script extracting
+# the pod ordinal from hostname and passing it to run-hbase-regionserver.sh.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: regionserver
+  namespace: zenoss
+  labels:
+    app: regionserver
+    tier: data
+spec:
+  selector:
+    app: regionserver
+  ports:
+    - name: regionserver
+      port: 60200
+      targetPort: 60200
+    - name: web-ui
+      port: 60300
+      targetPort: 60300
+  clusterIP: None   # Headless — RegionServer registers itself by stable hostname in ZK
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: regionserver-pdb
+  namespace: zenoss
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: regionserver
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: regionserver
+  namespace: zenoss
+  labels:
+    app: regionserver
+    tier: data
+spec:
+  serviceName: regionserver
+  replicas: 1
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: regionserver
+  template:
+    metadata:
+      labels:
+        app: regionserver
+        tier: data
+    spec:
+      securityContext:
+        runAsUser: 0
+      terminationGracePeriodSeconds: 60   # Allow time for region hand-off
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: regionserver
+                topologyKey: kubernetes.io/hostname
+
+      initContainers:
+        # Wait for ZooKeeper — RegionServer registers itself in ZK on startup.
+        - name: wait-for-zookeeper
+          image: zenoss/hbase:24.0.8
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for ZooKeeper..."
+              until { echo ruok; sleep 1; } | nc zookeeper.zenoss.svc.cluster.local 2181 | grep -q imok; do
+                echo "ZooKeeper not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "ZooKeeper is up."
+
+        # Wait for HMaster REST API — RegionServer needs a master to register with.
+        # This uses the same check as OpenTSDB's prereq: HMaster REST answering.
+        - name: wait-for-hmaster
+          image: zenoss/hbase:24.0.8
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for HMaster REST API..."
+              until wget -q -O /dev/null http://hmaster.zenoss.svc.cluster.local:61000/status/cluster; do
+                echo "HMaster REST not ready, retrying in 10s..."
+                sleep 10
+              done
+              echo "HMaster is up."
+
+        # Inject hbase-site.xml and hbase-env.sh from ConfigMap.
+        - name: config-init
+          image: zenoss/hbase:24.0.8
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Writing hbase-site.xml..."
+              cp /config/hbase-site.xml /etc/hbase-site.xml
+              chown hbase:hbase /etc/hbase-site.xml
+              chmod 0664 /etc/hbase-site.xml
+
+              echo "Writing hbase-env.sh..."
+              cp /config/hbase-env.sh /etc/hbase-env.sh
+              chown hbase:hbase /etc/hbase-env.sh
+              chmod 0775 /etc/hbase-env.sh
+
+              # Write startup wrapper that passes the pod ordinal as INSTANCE_ID.
+              # CC passed $CONTROLPLANE_INSTANCE_ID as 2nd arg to run-hbase-regionserver.sh.
+              # We extract the ordinal from the pod hostname (regionserver-0 -> 0).
+              ORDINAL=$(hostname | grep -o '[0-9]*$')
+              echo "Pod ordinal / instance ID: ${ORDINAL}"
+              cat > /scripts/start-regionserver.sh << EOF
+              #!/bin/sh
+              exec /usr/bin/run-hbase-regionserver.sh /etc/hbase-site.xml ${ORDINAL}
+              EOF
+              chmod +x /scripts/start-regionserver.sh
+              echo "Startup script written."
+          volumeMounts:
+            - name: config-source
+              mountPath: /config
+            - name: hbase-config
+              mountPath: /etc
+            - name: scripts
+              mountPath: /scripts
+
+      containers:
+        - name: regionserver
+          image: zenoss/hbase:24.0.8
+          # CC Command: /usr/bin/run-hbase-regionserver.sh /etc/hbase-site.xml $CONTROLPLANE_INSTANCE_ID
+          # Wrapper script passes the correct ordinal from pod hostname.
+          command: ["/scripts/start-regionserver.sh"]
+          securityContext:
+            privileged: true    # CC Privileged: true
+          resources:
+            requests:
+              memory: "1Gi"     # CC RAMCommitment: 1G
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          env:
+            - name: HBASE_HEAPSIZE
+              value: "921"      # 1G * 0.9 = 921MB
+          ports:
+            - name: regionserver
+              containerPort: 60200
+            - name: web-ui
+              containerPort: 60300
+          volumeMounts:
+            - name: data
+              mountPath: /var/hbase
+            - name: hbase-config
+              mountPath: /etc/hbase-site.xml
+              subPath: hbase-site.xml
+            - name: hbase-config
+              mountPath: /etc/hbase-env.sh
+              subPath: hbase-env.sh
+            - name: scripts
+              mountPath: /scripts
+          readinessProbe:
+            # CC HealthCheck answering: echo | nc localhost 60200
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "echo | nc 127.0.0.1 60200"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "echo | nc 127.0.0.1 60200"
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 5
+
+      volumes:
+        - name: config-source
+          configMap:
+            name: zenoss-config
+            items:
+              - key: hbase-site.xml
+                path: hbase-site.xml
+              - key: hbase-env.sh
+                path: hbase-env.sh
+        - name: hbase-config
+          emptyDir: {}
+        - name: scripts
+          emptyDir: {}
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi   # RegionServer stores its assigned HBase regions here
