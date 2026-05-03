@@ -1,0 +1,262 @@
+# =============================================================================
+# RabbitMQ
+# =============================================================================
+# Source: ControlCenter service "rabbitmq" under Infrastructure
+# Image:  rabbitmq:3-management (official Docker Hub image)
+# RAM:    1G   CPU: 1
+# StartLevel: 1
+#
+# Image decision rationale:
+#   The zenoss/core_6.3 image ships RabbitMQ 3.3.5 with pre-baked mnesia data
+#   tied to node identity rabbit@rbt0. The mnesia database stores cluster
+#   topology internally - renaming directories is insufficient to change node
+#   identity. Starting fresh and recreating the /zenoss vhost and zenoss user
+#   is cleaner and more reliable.
+#
+#   RabbitMQ has no Zenoss-specific code. The official rabbitmq:3-management
+#   image is purpose-built and includes the management plugin required for
+#   health checks. This follows the same pattern as memcached.
+#
+# Zenoss requirements from original deployment:
+#   - vhost: /zenoss
+#   - user: zenoss, password: zenoss
+#   - user permissions on /zenoss vhost
+#   - Ports: 5672 (AMQP), 15672 (management), 4369 (epmd), 44001 (inter-node)
+#
+# Setup approach:
+#   - initContainer creates vhost and user via management API after RabbitMQ
+#     starts - uses rabbitmqadmin CLI bundled with management image
+#   - Actually: use RABBITMQ_DEFAULT_* env vars for simpler initial setup
+#     then create /zenoss vhost via post-start lifecycle hook
+#
+# Translation notes:
+#   - StatefulSet with volumeClaimTemplate for /var/lib/rabbitmq
+#   - RABBITMQ_DEFAULT_USER/PASS sets admin credentials
+#   - postStart lifecycle hook creates /zenoss vhost and grants permissions
+#   - Erlang cookie set for future clustering
+#   - controlplane_consumer import omitted - CC-specific
+# =============================================================================
+
+---
+# Headless Service for stable per-pod DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-headless
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+    app.kubernetes.io/name: rabbitmq
+    tier: infrastructure
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+    - name: management
+      port: 15672
+      targetPort: 15672
+    - name: epmd
+      port: 4369
+      targetPort: 4369
+    - name: inter-node
+      port: 44001
+      targetPort: 44001
+
+---
+# ClusterIP Service
+# DNS: rabbitmq.zenoss.svc.cluster.local:5672
+# Matches ConfigMap: amqphost
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+    app.kubernetes.io/name: rabbitmq
+    tier: infrastructure
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+    - name: management
+      port: 15672
+      targetPort: 15672
+    - name: epmd
+      port: 4369
+      targetPort: 4369
+    - name: inter-node
+      port: 44001
+      targetPort: 44001
+
+---
+# PodDisruptionBudget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rabbitmq-pdb
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+    app.kubernetes.io/name: rabbitmq
+    tier: infrastructure
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq
+
+---
+# StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: zenoss
+  labels:
+    app.kubernetes.io/part-of: zenoss
+    app.kubernetes.io/name: rabbitmq
+    tier: infrastructure
+spec:
+  serviceName: rabbitmq-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: zenoss
+        app.kubernetes.io/name: rabbitmq
+        tier: infrastructure
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: rabbitmq
+                topologyKey: kubernetes.io/hostname
+
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3-management
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: amqp
+              containerPort: 5672
+              protocol: TCP
+            - name: management
+              containerPort: 15672
+              protocol: TCP
+            - name: epmd
+              containerPort: 4369
+              protocol: TCP
+            - name: inter-node
+              containerPort: 44001
+              protocol: TCP
+
+          env:
+            # Default admin user - matches zenoss user credentials
+            - name: RABBITMQ_DEFAULT_USER
+              value: "zenoss"
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: zenoss-secrets
+                  key: amqppassword
+            # Default vhost - creates /zenoss vhost on first start
+            - name: RABBITMQ_DEFAULT_VHOST
+              value: "/zenoss"
+            # Erlang cookie for clustering
+            - name: RABBITMQ_ERLANG_COOKIE
+              value: "zenoss-rabbit-cookie"
+            # Limit inter-node port range to match ControlCenter config
+            - name: RABBITMQ_DIST_PORT
+              value: "44001"
+            # Node name uses pod hostname for stable identity
+            - name: RABBITMQ_NODENAME
+              value: "rabbit@rabbitmq-0"
+
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+
+          # Lifecycle hook creates /zenoss vhost permissions after startup
+          # RABBITMQ_DEFAULT_VHOST creates the vhost but we need to ensure
+          # the zenoss user has full permissions on it
+          # postStart waits for RabbitMQ then sets vhost permissions
+          # Uses rabbitmqctl - no curl needed
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - bash
+                  - -c
+                  - |
+                    for i in $(seq 1 30); do
+                      rabbitmqctl status > /dev/null 2>&1 && break
+                      sleep 2
+                    done
+                    rabbitmqctl set_permissions -p /zenoss zenoss '.*' '.*' '.*' || true
+
+          # readinessProbe uses built-in rabbitmq-diagnostics
+          # curl is not available in official rabbitmq image
+          readinessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - check_port_connectivity
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+            successThreshold: 1
+
+          livenessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - status
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 15
+            failureThreshold: 3
+            successThreshold: 1
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/part-of: zenoss
+          app.kubernetes.io/name: rabbitmq
+          tier: infrastructure
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
