@@ -155,3 +155,28 @@ Docker Hub images:
 4. Read TIER-01-INFRASTRUCTURE-COMPLETE.md
 5. Attach the ControlCenter JSON manifest to the new conversation
 6. Start with ZooKeeper inspection and manifest
+
+---
+
+## Claude Access Setup
+
+SSH access is configured for read/inspect operations.
+
+Server: 195.201.43.82
+User: claude-access
+Key: ~/.ssh/claude_zenoss (on your laptop)
+
+At the start of the next session paste the private key content so Claude
+can SSH in to read pod status, logs, and files directly without copy-paste.
+
+Private key is at: ~/.ssh/claude_zenoss on your laptop
+Public key fingerprint: AAAAC3NzaC1lZDI1NTE5AAAAIKQI1tmK2Kp82ygW0UFEgsnkmYHcfvvp7w5GdwJl2GH5
+
+Access model:
+- Claude SSHes in to READ: logs, pod status, manifest files, inspection output
+- You RUN all kubectl apply/delete/patch commands
+- You RUN all git commits and pushes
+- Claude WRITES manifest files directly to /opt/self-directed-ai-learning/zenoss-k8s/
+
+Project directory: /opt/self-directed-ai-learning/zenoss-k8s/
+Claude has write access to zenoss-k8s/ only via zenoss-project group.
