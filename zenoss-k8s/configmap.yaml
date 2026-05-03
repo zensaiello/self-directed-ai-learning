@@ -142,8 +142,6 @@ data:
     initLimit=5
     syncLimit=2
     server.1=zookeeper-0.zookeeper.zenoss.svc.cluster.local:2888:3888
-    server.2=zookeeper-1.zookeeper.zenoss.svc.cluster.local:2888:3888
-    server.3=zookeeper-2.zookeeper.zenoss.svc.cluster.local:2888:3888
     autopurge.snapRetainCount=3
     autopurge.purgeInterval=1
 
@@ -308,3 +306,50 @@ data:
       minTimeBetweenBroadcast: 200
       tsdbWriterThreads: 1
       writerURL: http://opentsdb-writer.zenoss.svc.cluster.local:4242/api/put
+
+  # -------------------------------------------------------------------------
+  # HBase JVM environment (shared by HMaster and RegionServer)
+  # -------------------------------------------------------------------------
+  # CC source: HMaster ConfigFiles["/etc/hbase-env.sh"]
+  # HBASE_MANAGES_ZK=false: HBase must not start its own ZK (we run it separately)
+  # HBASE_HEAPSIZE: {{percentScale (bytesToMB 1G) 0.9}} = 921MB
+  # Passed as env var HBASE_HEAPSIZE in manifests, but also provided here
+  # as a config file for completeness.
+  hbase-env.sh: |
+    export HBASE_MANAGES_ZK=false
+    export HBASE_HEAPSIZE=921
+
+  # -------------------------------------------------------------------------
+  # OpenTSDB logback configuration — stdout only
+  # -------------------------------------------------------------------------
+  # CC source: opentsdb ConfigFiles["/opt/opentsdb/src/logback.xml"]
+  # Modification: FILE and QUERY_LOG appenders removed.
+  #   CC's logback.xml included both STDOUT and FILE appenders. In Kubernetes,
+  #   all logging must go to stdout/stderr for kubectl logs to work.
+  #   The /logs HTTP endpoint (CYCLIC appender) is retained as it costs little
+  #   and provides useful diagnostics. File paths removed entirely.
+  opentsdb-logback.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <configuration>
+      <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+          <pattern>%date{ISO8601} %-5level [%thread] %logger{0}: %msg%n</pattern>
+        </encoder>
+      </appender>
+
+      <appender name="CYCLIC" class="ch.qos.logback.core.read.CyclicBufferAppender">
+        <MaxSize>1024</MaxSize>
+      </appender>
+
+      <logger name="QueryLog" level="OFF" additivity="false"/>
+      <logger name="org.apache.zookeeper" level="INFO"/>
+      <!-- ZEN-26681 -->
+      <logger name="org.hbase.async" level="WARN"/>
+      <logger name="com.stumbleupon.async" level="WARN"/>
+
+      <root level="INFO">
+        <appender-ref ref="STDOUT"/>
+        <appender-ref ref="CYCLIC"/>
+      </root>
+      </configuration>
+
