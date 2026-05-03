@@ -237,7 +237,7 @@ data:
   # RAM is set explicitly rather than derived from .RAMCommitment template.
   # -----------------------------------------------------------------------
   solr.in.sh: |
-    ZK_HOST=zookeeper.zenoss.svc.cluster.local:2181/solr
+    ZK_HOST=localhost:9983
     SOLR_JAVA_MEM="-Xmx1g"
 
   # -----------------------------------------------------------------------
