@@ -1,0 +1,186 @@
+# VictoriaMetrics — Tier 02: Data
+#
+# Image: victoriametrics/victoria-metrics:v1.101.0
+# Purpose: Time series database replacing the entire HBase + OpenTSDB stack
+#
+# Architectural decision:
+#   The original Tier 02 plan used ZooKeeper + HMaster + RegionServer + OpenTSDB.
+#   This was replaced with VictoriaMetrics because:
+#   - HBase requires shared storage between HMaster and RegionServer which
+#     k3s local-path-provisioner cannot provide (ReadWriteMany not supported)
+#   - The entire HBase stack exists solely to store time series metrics
+#   - VictoriaMetrics is a modern single-binary TSDB that speaks OpenTSDB
+#     protocol natively — Zenoss sees no difference
+#
+# OpenTSDB compatibility:
+#   VictoriaMetrics accepts OpenTSDB ingestion on port 4242 via the
+#   -opentsdbListenAddr flag. Zenoss's metric-consumer writes to
+#   opentsdb-writer.zenoss.svc.cluster.local:4242 — unchanged.
+#   Zenoss's central-query reads from opentsdb-reader.zenoss.svc.cluster.local:4242
+#   — also unchanged. Both Services point to this same pod.
+#
+# Two Services (opentsdb-reader, opentsdb-writer):
+#   CC exposed two named endpoints for OpenTSDB, both on port 4242.
+#   We create two ClusterIP Services with the same selector pointing to
+#   this pod. Zenoss DNS references are preserved with zero config changes.
+#
+# Grafana integration:
+#   VictoriaMetrics HTTP API runs on port 8428.
+#   Grafana uses this as its datasource endpoint.
+
+---
+# opentsdb-writer: used by metric-consumer for metric ingestion
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentsdb-writer
+  namespace: zenoss
+  labels:
+    app: victoriametrics
+    tier: data
+spec:
+  selector:
+    app: victoriametrics
+  ports:
+    - name: opentsdb
+      port: 4242
+      targetPort: 4242
+
+---
+# opentsdb-reader: used by central-query for metric reads
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentsdb-reader
+  namespace: zenoss
+  labels:
+    app: victoriametrics
+    tier: data
+spec:
+  selector:
+    app: victoriametrics
+  ports:
+    - name: opentsdb
+      port: 4242
+      targetPort: 4242
+
+---
+# victoriametrics: internal service for Grafana datasource
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoriametrics
+  namespace: zenoss
+  labels:
+    app: victoriametrics
+    tier: data
+spec:
+  selector:
+    app: victoriametrics
+  ports:
+    - name: http
+      port: 8428
+      targetPort: 8428
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: victoriametrics-pdb
+  namespace: zenoss
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: victoriametrics
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: victoriametrics
+  namespace: zenoss
+  labels:
+    app: victoriametrics
+    tier: data
+spec:
+  serviceName: victoriametrics
+  replicas: 1
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: victoriametrics
+  template:
+    metadata:
+      labels:
+        app: victoriametrics
+        tier: data
+    spec:
+      terminationGracePeriodSeconds: 60
+      enableServiceLinks: false
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: victoriametrics
+                topologyKey: kubernetes.io/hostname
+
+      containers:
+        - name: victoriametrics
+          image: victoriametrics/victoria-metrics:v1.101.0
+          args:
+            # Data storage path on the PVC
+            - -storageDataPath=/storage
+            # OpenTSDB ingestion endpoint — Zenoss writes here
+            - -opentsdbListenAddr=:4242
+            # HTTP API endpoint — Grafana reads here
+            - -httpListenAddr=:8428
+            # Retain 1 year of metrics
+            - -retentionPeriod=12
+            # Allow ingestion of out-of-order samples (common with Zenoss collectors)
+            - -search.maxStalenessInterval=5m
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          ports:
+            - name: http
+              containerPort: 8428
+            - name: opentsdb
+              containerPort: 4242
+          volumeMounts:
+            - name: storage
+              mountPath: /storage
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi   # Metrics storage — size generously
+                            # VictoriaMetrics compresses well (~10x vs raw)
+                            # 50Gi holds ~500Gi of raw metric data
