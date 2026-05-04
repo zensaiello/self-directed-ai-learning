@@ -152,4 +152,3 @@ kubectl exec solr-0 -n zenoss -- curl -sf \
   "http://localhost:8983/solr/admin/collections?action=LIST"
 # Expected: {"collections":["zenoss_model"]}
 ```
-
