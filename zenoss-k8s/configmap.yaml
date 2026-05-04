@@ -106,6 +106,10 @@ data:
     amqpadminport 15672
     amqpadminusessl 0
     amqpusessl 0
+    redis-host redis.zenoss.svc.cluster.local
+    redis-port 6379
+    redis-url redis://redis.zenoss.svc.cluster.local:6379/0
+    solr-servers solr.zenoss.svc.cluster.local:8983
     zodb-host mariadb.zenoss.svc.cluster.local
     zodb-port 3306
     zodb-user zenoss
@@ -352,4 +356,141 @@ data:
         <appender-ref ref="CYCLIC"/>
       </root>
       </configuration>
+
+# ConfigMap additions for Tier 03: Zope
+#
+# Add these keys to zenoss-config ConfigMap in configmap.yaml.
+# Verify with: kubectl diff -f configmap.yaml before applying.
+#
+# Keys added:
+#   zope.conf          - Full Zope configuration with DNS substitutions
+#   zodb_db_main.conf  - MariaDB connection for main ZODB store
+#   zodb_db_session.conf - MariaDB connection for session store
+#
+# Template substitutions performed vs CC source:
+#   127.0.0.1:11211 (memcached)         -> memcached.zenoss.svc.cluster.local:11211
+#   127.0.0.1:11212 (memcached-session) -> memcached-session.zenoss.svc.cluster.local:11211
+#   {{percentScale .RAMCommitment 0.5 | bytesToMB}} -> 128 (50% of 256M RAMCommitment)
+#   {{getContext . "global.conf.zodb-host"}}     -> mariadb.zenoss.svc.cluster.local
+#   {{getContext . "global.conf.zodb-port"}}     -> 3306
+#   {{getContext . "global.conf.zodb-user"}}     -> zenoss
+#   {{getContext . "global.conf.zodb-password"}} -> zenoss
+#   {{getContext . "global.conf.zodb-db"}}       -> zodb
+#
+# Note: global.conf is already in ConfigMap from Tier 01.
+
+  # -------------------------------------------------------------------------
+  # zodb_db_main.conf — MariaDB connection for main ZODB object store
+  # -------------------------------------------------------------------------
+  # CC source: Zope ConfigFiles["/opt/zenoss/etc/zodb_db_main.conf"]
+  zodb_db_main.conf: |
+    <mysql>
+        host    mariadb.zenoss.svc.cluster.local
+        port    3306
+        user    zenoss
+        passwd  zenoss
+        db      zodb
+    </mysql>
+
+  # -------------------------------------------------------------------------
+  # zodb_db_session.conf — MariaDB connection for Zope session store
+  # -------------------------------------------------------------------------
+  # CC source: Zope ConfigFiles["/opt/zenoss/etc/zodb_db_session.conf"]
+  zodb_db_session.conf: |
+    <mysql>
+        host    mariadb.zenoss.svc.cluster.local
+        port    3306
+        user    zenoss
+        passwd  zenoss
+        db      zodb_session
+    </mysql>
+
+  # -------------------------------------------------------------------------
+  # zope.conf — Full Zope configuration
+  # -------------------------------------------------------------------------
+  # CC source: Zope ConfigFiles["/opt/zenoss/etc/zope.conf"]
+  # Modifications:
+  #   - 127.0.0.1:11211 replaced with memcached ClusterDNS
+  #   - 127.0.0.1:11212 replaced with memcached-session ClusterDNS
+  #   - cache-local-mb hardcoded to 128 (50% of 256M RAMCommitment)
+  #   - Log paths kept as-is (logs go to /opt/zenoss/log which is emptyDir
+  #     in Kubernetes — logs don't need to be persistent)
+  zope.conf: |
+    %define INSTANCE /opt/zenoss
+
+    default-zpublisher-encoding utf-8
+
+    instancehome $INSTANCE
+
+    effective-user zenoss
+
+    enable-product-installation off
+
+    maximum-number-of-session-objects 100000
+
+    conflict-error-log-level debug
+
+    # <cgi-environment>
+    #   HTTPS ON
+    # </cgi-environment>
+
+    <eventlog>
+      level info
+      <logfile>
+        path $INSTANCE/log/event.log
+        level info
+      </logfile>
+    </eventlog>
+
+    <logger access>
+      level WARN
+      <logfile>
+        path $INSTANCE/log/Z2.log
+        format %(message)s
+      </logfile>
+    </logger>
+
+    <http-server>
+      address 9080
+    </http-server>
+
+    <zodb_db temporary>
+        mount-point /temp_folder
+        %import relstorage
+        <relstorage>
+          keep-history false
+          %include zodb_db_session.conf
+        </relstorage>
+    </zodb_db>
+
+    <zodb_db main>
+      mount-point /
+      cache-size 100000
+      %import relstorage
+      <relstorage>
+        cache-servers memcached.zenoss.svc.cluster.local:11211
+        cache-module-name memcache
+        cache-local-mb 128
+        keep-history false
+        %include zodb_db_main.conf
+      </relstorage>
+    </zodb_db>
+
+    <product-config beaker>
+        cache.type              ext:memcached
+        cache.url               memcached.zenoss.svc.cluster.local:11211
+        cache.data_dir          /tmp/cache/data
+        cache.lock_dir          /tmp/cache/lock
+        cache.regions           short, long
+        cache.short.expire      60
+        cache.long.expire       3600
+
+        session.type            ext:memcached
+        session.url             memcached-session.zenoss.svc.cluster.local:11211
+        session.data_dir        /tmp/sessions/data
+        session.lock_dir        /tmp/sessions/lock
+        session.key             beaker.session
+        session.secret          supersecret
+        session.secure          False
+    </product-config>
 

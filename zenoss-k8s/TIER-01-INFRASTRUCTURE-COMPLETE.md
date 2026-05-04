@@ -252,3 +252,4 @@ kubectl exec solr-0 -n zenoss -- curl -s \
   "http://localhost:8983/solr/zenoss_model/admin/ping?wt=json" | grep status
 # Expected: "status":"OK"
 ```
+

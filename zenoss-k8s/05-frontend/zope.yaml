@@ -1,0 +1,272 @@
+# Zope — Tier 03: User Interface
+#
+# Image: zenoss/core_6.3:6.3.2_1
+# CC Command: su - zenoss -c "/opt/zenoss/bin/runzope"
+# CC RAMCommitment: 256M
+# CC Port: 9080 (HTTP)
+# CC Health: curl http://localhost:9080/zport/ruok | grep -q imok
+# CC Prereq: MariaDB connectivity via ZenDB.py
+#
+# Key translation decisions:
+# - Command: CC ran as root then su'd to zenoss. We set runAsUser: 1337
+#   (zenoss uid) directly and call runzope without su.
+# - Config files: Four files injected by CC template engine:
+#     global.conf        - pre-rendered in zenoss-config ConfigMap (Tier 01)
+#     zope.conf          - large file, added to ConfigMap as zope.conf key
+#     zodb_db_main.conf  - MariaDB connection for main ZODB store
+#     zodb_db_session.conf - MariaDB connection for session store
+#   All four are in zenoss-config ConfigMap and mounted via subPath.
+# - zope.conf template substitutions performed:
+#     127.0.0.1:11211 -> memcached.zenoss.svc.cluster.local:11211
+#     127.0.0.1:11212 -> memcached-session.zenoss.svc.cluster.local:11211
+#     {{percentScale .RAMCommitment 0.5 | bytesToMB}} -> 128 (50% of 256M)
+# - Volumes: CC mounted several persistent volumes under /opt/zenoss.
+#   These hold ZenPacks, custom patches, export data, etc. We use a single
+#   PVC mounted at /opt/zenoss/var to persist the most critical data.
+#   Other paths use emptyDir for this initial deployment.
+# - Port: Zope listens on 9080. CC proxied this behind zproxy on 8080.
+#   We expose 9080 directly via NodePort for initial validation.
+#   A proper ingress/proxy is a future improvement.
+# - zenhub dependency: Zope imports zenhub on 8789 for collector communication.
+#   Zope will start and serve the UI without zenhub, but some operations
+#   (device management, collections) will fail. zenhub is built in Tier 04.
+# - zep dependency: Zope imports zep on 8084 for event display.
+#   Events UI will not work until zeneventserver is running (Tier 04).
+# - enableServiceLinks: false — prevents Kubernetes injecting ZOPE_PORT etc.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zope
+  namespace: zenoss
+  labels:
+    app: zope
+    tier: frontend
+spec:
+  selector:
+    app: zope
+  type: NodePort
+  ports:
+    - name: http
+      port: 9080
+      targetPort: 9080
+      nodePort: 30980   # Access via http://<server-ip>:30980
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zope-pdb
+  namespace: zenoss
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: zope
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zope-var
+  namespace: zenoss
+  labels:
+    app: zope
+    tier: frontend
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi   # Holds ZenPacks, var data, exports
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zope
+  namespace: zenoss
+  labels:
+    app: zope
+    tier: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zope
+  template:
+    metadata:
+      labels:
+        app: zope
+        tier: frontend
+    spec:
+      securityContext:
+        runAsUser: 1337     # zenoss uid — same as in Solr/other zenoss services
+        runAsGroup: 1337
+        fsGroup: 1337
+      terminationGracePeriodSeconds: 60
+      enableServiceLinks: false
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: zope
+                topologyKey: kubernetes.io/hostname
+
+      initContainers:
+        # -----------------------------------------------------------------------
+        # fix-permissions
+        # PVC is created owned by root. Zope runs as zenoss (uid 1337).
+        # -----------------------------------------------------------------------
+        - name: fix-permissions
+          image: busybox:1.36
+          securityContext:
+            runAsUser: 0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              chown -R 1337:1337 /opt/zenoss/var
+              echo "Permissions set for uid 1337 (zenoss)"
+          volumeMounts:
+            - name: zope-var
+              mountPath: /opt/zenoss/var
+
+        # -----------------------------------------------------------------------
+        # wait-for-mariadb
+        # CC Prereq: su - zenoss -c 'ZenDB.py --usedb zodb --execsql=";"'
+        # Translated: simple MySQL connectivity check.
+        # -----------------------------------------------------------------------
+        - name: wait-for-mariadb
+          image: zenoss/core_6.3:6.3.2_1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1337
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Waiting for MariaDB..."
+              until mysql -h mariadb.zenoss.svc.cluster.local \
+                          -u zenoss -pzenoss \
+                          -e "SELECT 1" zodb &>/dev/null; do
+                echo "MariaDB not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "MariaDB is ready."
+
+
+        # -----------------------------------------------------------------------
+        # ensure-solr-collection
+        # Waits for Solr to be ready and creates the zenoss_model collection
+        # if it doesn't already exist. Replaces the manual solr-create-collection
+        # Job. Idempotent — exits cleanly if collection already exists.
+        # Uses solr:6.6 to match the Solr version running in the cluster.
+        # -----------------------------------------------------------------------
+        - name: ensure-solr-collection
+          image: solr:6.6
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Waiting for Solr Collections API..."
+              until curl -sf "http://solr.zenoss.svc.cluster.local:8983/solr/admin/collections?action=LIST" 2>/dev/null; do
+                echo "Solr not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "Solr is ready."
+
+              COLLECTIONS=$(curl -sf "http://solr.zenoss.svc.cluster.local:8983/solr/admin/collections?action=LIST")
+              if echo "$COLLECTIONS" | grep -q "zenoss_model"; then
+                echo "Collection zenoss_model already exists."
+                exit 0
+              fi
+
+              echo "Creating zenoss_model collection..."
+              curl -sf "http://solr.zenoss.svc.cluster.local:8983/solr/admin/collections?action=CREATE&name=zenoss_model&numShards=1&replicationFactor=1&collection.configName=zenoss_model"
+              echo "Collection created successfully."
+
+      containers:
+        - name: zope
+          image: zenoss/core_6.3:6.3.2_1
+          imagePullPolicy: IfNotPresent
+          # CC Command: su - zenoss -c "/opt/zenoss/bin/runzope"
+          # We run as zenoss directly (runAsUser: 1337) so no su needed.
+          command:
+            - /bin/bash
+            - -c
+            - |
+              exec /opt/zenoss/bin/runzope
+          resources:
+            requests:
+              memory: "256Mi"   # CC RAMCommitment: 256M
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "2000m"
+          env:
+            - name: ZENHOME
+              value: /opt/zenoss
+            - name: PYTHONPATH
+              value: /opt/zenoss/lib/python
+          ports:
+            - name: http
+              containerPort: 9080
+          volumeMounts:
+            # Persistent var directory
+            - name: zope-var
+              mountPath: /opt/zenoss/var
+            # Config files from ConfigMap
+            - name: zenoss-config
+              mountPath: /opt/zenoss/etc/global.conf
+              subPath: global.conf
+            - name: zenoss-config
+              mountPath: /opt/zenoss/etc/zope.conf
+              subPath: zope.conf
+            - name: zenoss-config
+              mountPath: /opt/zenoss/etc/zodb_db_main.conf
+              subPath: zodb_db_main.conf
+            - name: zenoss-config
+              mountPath: /opt/zenoss/etc/zodb_db_session.conf
+              subPath: zodb_db_session.conf
+            # Ephemeral directories
+            - name: zope-log
+              mountPath: /opt/zenoss/log
+            - name: zope-tmp
+              mountPath: /tmp
+          readinessProbe:
+            # CC Health: curl http://localhost:9080/zport/ruok | grep -q imok
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - "curl -A 'readiness' -sf http://localhost:9080/zport/ruok | grep -q imok"
+            initialDelaySeconds: 120   # Zope takes 2+ minutes to initialize
+            periodSeconds: 15
+            failureThreshold: 8
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - "curl -A 'liveness' --max-time 30 -sf http://localhost:9080/zport/ruok"
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 5
+
+      volumes:
+        - name: zope-var
+          persistentVolumeClaim:
+            claimName: zope-var
+        - name: zenoss-config
+          configMap:
+            name: zenoss-config
+        - name: zope-log
+          emptyDir: {}
+        - name: zope-tmp
+          emptyDir: {}
+
