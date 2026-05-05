@@ -17,6 +17,7 @@ data:
   amqphost: "rabbitmq.zenoss.svc.cluster.local"
   amqpport: "5672"
   amqpuser: "zenoss"
+  amqppassword: "zenoss"
   amqpvhost: "/zenoss"
   amqpadminport: "15672"
   amqpadminusessl: "0"
@@ -102,6 +103,7 @@ data:
     amqphost rabbitmq.zenoss.svc.cluster.local
     amqpport 5672
     amqpuser zenoss
+    amqppassword zenoss
     amqpvhost /zenoss
     amqpadminport 15672
     amqpadminusessl 0
@@ -119,7 +121,7 @@ data:
     zodb-cacheservers memcached.zenoss.svc.cluster.local:11211
     zodb-cachesize 1000
     zodb-cache-max-object-size 1048576
-    zep-host zeneventserver.zenoss.svc.cluster.local
+    zep-host mariadb.zenoss.svc.cluster.local
     zep-port 3306
     zep-uri http://zeneventserver.zenoss.svc.cluster.local:8084
     zep-user zenoss
