@@ -43,7 +43,7 @@ spec:
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsUser: 1337
-        runAsGroup: 1337
+        runAsGroup: 1206
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -250,7 +250,7 @@ spec:
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsUser: 1337
-        runAsGroup: 1337
+        runAsGroup: 1206
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -390,7 +390,7 @@ spec:
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsUser: 1337
-        runAsGroup: 1337
+        runAsGroup: 1206
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -609,7 +609,7 @@ spec:
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsUser: 1337
-        runAsGroup: 1337
+        runAsGroup: 1206
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
