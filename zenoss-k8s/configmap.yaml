@@ -113,6 +113,7 @@ data:
     amqpadminport 15672
     amqpadminusessl 0
     amqpusessl 0
+    hubhost zenhub.zenoss.svc.cluster.local
     mysqluser zenoss
     mysqlpasswd zenoss
     mysqldb zodb
