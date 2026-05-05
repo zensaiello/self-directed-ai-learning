@@ -716,3 +716,353 @@ spec:
   selector:
     matchLabels:
       app: zenjobs
+
+---
+---
+# ============================================================
+# zenhubworker — Worker pool for zenhub service requests
+# CC: RAMCommitment 256M, CPUCommitment 1, Instances Min:1 Default:2
+# StatefulSet: provides stable pod names (zenhubworker-0, zenhubworker-1)
+# so --workerid can be extracted as an integer from the pod name suffix.
+# No exported ports — connects back to zenhub on 8789.
+# ============================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zenhubworker
+  namespace: zenoss
+  labels:
+    app: zenhubworker
+    tier: resmgr
+spec:
+  serviceName: zenhubworker-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: zenhubworker
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: zenhubworker
+        tier: resmgr
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: 1337
+        runAsGroup: 1206
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: zenhubworker
+                topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: wait-for-zenhub
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for zenhub port 8789..."
+              until nc -z zenhub.zenoss.svc.cluster.local 8789 2>/dev/null; do
+                echo "  zenhub not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "zenhub ready."
+        - name: wait-for-mariadb
+          image: zenoss/core_6.3:6.3.2_1
+          command:
+            - sh
+            - -c
+            - |
+              until mysql -h mariadb.zenoss.svc.cluster.local \
+                          -u zenoss -pzenoss \
+                          zodb -e "SELECT 1" >/dev/null 2>&1; do
+                echo "  MariaDB not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "MariaDB ready."
+          securityContext:
+            runAsUser: 0
+        - name: wait-for-solr
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until wget -qO- \
+                "http://solr.zenoss.svc.cluster.local:8983/solr/zenoss_model/admin/ping?wt=json" \
+                2>/dev/null | grep -q '"status":"OK"'; do
+                echo "  Solr not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "Solr ready."
+      containers:
+        - name: zenhubworker
+          image: zenoss/core_6.3:6.3.2_1
+          # Extract integer workerid from stable pod name suffix:
+          # zenhubworker-0 -> 0, zenhubworker-1 -> 1
+          command:
+            - /bin/bash
+            - -c
+            - |
+              WORKER_ID=${MY_POD_NAME##*-}
+              exec /opt/zenoss/bin/zenhubworker run -c --logfileonly \
+                --monitor localhost \
+                --workerid ${WORKER_ID} \
+                --hubhost zenhub.zenoss.svc.cluster.local
+          env:
+            - name: ZENHOME
+              value: /opt/zenoss
+            - name: ZENOSS_DAEMON
+              value: "1"
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: global-conf
+              mountPath: /opt/zenoss/etc/global.conf
+              subPath: global.conf
+            - name: logs
+              mountPath: /opt/zenoss/log
+          readinessProbe:
+            exec:
+              command:
+                - pgrep
+                - -f
+                - zenhubworker.py
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - pgrep
+                - -f
+                - zenhubworker.py
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            failureThreshold: 4
+      volumes:
+        - name: global-conf
+          configMap:
+            name: zenoss-config
+            items:
+              - key: global.conf
+                path: global.conf
+        - name: logs
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zenhubworker-headless
+  namespace: zenoss
+  labels:
+    app: zenhubworker
+    tier: resmgr
+spec:
+  clusterIP: None
+  selector:
+    app: zenhubworker
+  ports:
+    - name: placeholder
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zenhubworker-pdb
+  namespace: zenoss
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: zenhubworker
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zenhubworker-pdb
+  namespace: zenoss
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: zenhubworker
+
+---
+# ============================================================
+# zenactiond — Event action daemon (notifications, alerts)
+# CC: RAMCommitment 256M, CPUCommitment 1, Instances Min:1
+# Note: In later Zenoss versions this was replaced by the
+# Notification ZenPack framework. In 6.3 zenactiond is still
+# the active notification handler.
+# No exported ports — connects outbound to zenhub XML-RPC + RabbitMQ
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zenactiond
+  namespace: zenoss
+  labels:
+    app: zenactiond
+    tier: resmgr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zenactiond
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: zenactiond
+        tier: resmgr
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: 1337
+        runAsGroup: 1206
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: zenactiond
+                topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: wait-for-zenhub
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z zenhub.zenoss.svc.cluster.local 8789 2>/dev/null; do
+                echo "  zenhub not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "zenhub ready."
+        - name: wait-for-mariadb
+          image: zenoss/core_6.3:6.3.2_1
+          command:
+            - sh
+            - -c
+            - |
+              until mysql -h mariadb.zenoss.svc.cluster.local \
+                          -u zenoss -pzenoss \
+                          zodb -e "SELECT 1" >/dev/null 2>&1; do
+                echo "  MariaDB not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "MariaDB ready."
+          securityContext:
+            runAsUser: 0
+        - name: wait-for-rabbitmq
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z rabbitmq.zenoss.svc.cluster.local 5672 2>/dev/null; do
+                echo "  RabbitMQ not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "RabbitMQ ready."
+      containers:
+        - name: zenactiond
+          image: zenoss/core_6.3:6.3.2_1
+          # CC Command: zenactiond run -c --logfileonly --workerid $INSTANCE_ID
+          command:
+            - /bin/bash
+            - -c
+            - |
+              exec /opt/zenoss/bin/zenactiond run -c --logfileonly \
+                --workerid 0
+          env:
+            - name: ZENHOME
+              value: /opt/zenoss
+            - name: ZENOSS_DAEMON
+              value: "1"
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: global-conf
+              mountPath: /opt/zenoss/etc/global.conf
+              subPath: global.conf
+            - name: logs
+              mountPath: /opt/zenoss/log
+          readinessProbe:
+            # CC HealthCheck "running": pgrep -fu zenoss zenactiond.py
+            exec:
+              command:
+                - pgrep
+                - -f
+                - zenactiond.py
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - pgrep
+                - -f
+                - zenactiond.py
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            failureThreshold: 4
+      volumes:
+        - name: global-conf
+          configMap:
+            name: zenoss-config
+            items:
+              - key: global.conf
+                path: global.conf
+        - name: logs
+          emptyDir: {}
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zenactiond-pdb
+  namespace: zenoss
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app: zenactiond
