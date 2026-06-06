@@ -1,5 +1,0 @@
-# Never commit secrets to version control
-secrets.yaml
-
-# Kubernetes context files that may contain credentials
-*.kubeconfig
